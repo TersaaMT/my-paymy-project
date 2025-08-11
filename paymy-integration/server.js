@@ -1,361 +1,228 @@
-// PayMe (Payme.uz) Integration - Правильная реализация
-// Основано на официальной документации PayMe
-
 const express = require('express');
-const crypto = require('crypto');
+const bodyParser = require('body-parser');
+
 const app = express();
+app.use(bodyParser.json());
 
-// Middleware для парсинга JSON
-app.use(express.json());
+const LOGIN = "Paycom";
+const PASSWORD = "95n%ceFHPhU8G3UdiO3dt1g3EbpV8KFS66y9"; 
+const EXPECTED_AUTH = "Basic " + Buffer.from(`${LOGIN}:${PASSWORD}`).toString('base64');
 
-// Конфигурация PayMe (получите от разработчиков)
-const PAYCOM_CONFIG = {
-    MERCHANT_ID: process.env.PAYCOM_MERCHANT_ID || 'your_merchant_id',
-    SECRET_KEY: process.env.PAYCOM_SECRET_KEY || 'your_secret_key', // Это password из PayMe
-    ENDPOINT: '/paycom' // Стандартный endpoint для PayMe
-};
+const transactions = new Map();
 
-// Коды ошибок PayMe
-const PAYCOM_ERRORS = {
-    INVALID_AMOUNT: -31001,
-    TRANSACTION_NOT_FOUND: -31003,
-    INVALID_ACCOUNT: -31050,
-    UNABLE_TO_PERFORM: -31008,
-    TRANSACTION_CANCELLED: -31007
-};
+// Тестовые заказы для проверки
+const testOrders = new Map([
+  ['TEST_ORDER_001', { order_id: 'TEST_ORDER_001', amount: 50000, status: 'pending' }],
+  ['TEST_ORDER_002', { order_id: 'TEST_ORDER_002', amount: 100000, status: 'pending' }],
+  ['12345', { order_id: '12345', amount: 1000, status: 'pending' }] // для старых тестов
+]);
 
-// Функция для проверки авторизации
-function checkAuth(req) {
-    const auth = req.headers.authorization;
-    if (!auth || !auth.startsWith('Basic ')) {
-        return false;
-    }
-    
-    const credentials = Buffer.from(auth.slice(6), 'base64').toString();
-    const [username, password] = credentials.split(':');
-    
-    return username === 'Paycom' && password === PAYCOM_CONFIG.SECRET_KEY;
-}
-
-// Функция для создания JSON-RPC ответа
-function createResponse(id, result = null, error = null) {
-    const response = {
-        jsonrpc: '2.0',
-        id: id
-    };
-    
-    if (error) {
-        response.error = error;
-    } else {
-        response.result = result;
-    }
-    
-    return response;
-}
-
-// Основной endpoint PayMe
-app.post(PAYCOM_CONFIG.ENDPOINT, async (req, res) => {
-    try {
-        console.log('PayMe запрос:', JSON.stringify(req.body, null, 2));
-        
-        // Проверка авторизации
-        if (!checkAuth(req)) {
-            return res.status(401).json(createResponse(
-                req.body.id,
-                null,
-                { code: -32504, message: 'Insufficient privileges' }
-            ));
-        }
-
-        const { method, params, id } = req.body;
-
-        // Обработка различных методов PayMe
-        switch (method) {
-            case 'CheckPerformTransaction':
-                return res.json(await handleCheckPerformTransaction(params, id));
-                
-            case 'CreateTransaction':
-                return res.json(await handleCreateTransaction(params, id));
-                
-            case 'PerformTransaction':
-                return res.json(await handlePerformTransaction(params, id));
-                
-            case 'CancelTransaction':
-                return res.json(await handleCancelTransaction(params, id));
-                
-            case 'CheckTransaction':
-                return res.json(await handleCheckTransaction(params, id));
-                
-            case 'GetStatement':
-                return res.json(await handleGetStatement(params, id));
-                
-            default:
-                return res.json(createResponse(
-                    id,
-                    null,
-                    { code: -32601, message: 'Method not found' }
-                ));
-        }
-
-    } catch (error) {
-        console.error('Ошибка обработки PayMe запроса:', error);
-        return res.status(500).json(createResponse(
-            req.body.id,
-            null,
-            { code: -32603, message: 'Internal error' }
-        ));
-    }
-});
-
-// 1. CheckPerformTransaction - проверка возможности выполнения транзакции
-async function handleCheckPerformTransaction(params, id) {
-    try {
-        const { amount, account } = params;
-        
-        // Проверка суммы (минимум 1000 тийин = 10 сум)
-        if (amount < 1000) {
-            return createResponse(id, null, {
-                code: PAYCOM_ERRORS.INVALID_AMOUNT,
-                message: 'Неверная сумма'
-            });
-        }
-        
-        // Проверка существования заказа
-        const orderId = account.order_id;
-        if (!orderId) {
-            return createResponse(id, null, {
-                code: PAYCOM_ERRORS.INVALID_ACCOUNT,
-                message: 'Неверный аккаунт'
-            });
-        }
-        
-        // Здесь должна быть проверка заказа в вашей БД
-        // const order = await checkOrderExists(orderId);
-        
-        console.log(`Проверка транзакции для заказа ${orderId}, сумма: ${amount}`);
-        
-        return createResponse(id, { allow: true });
-        
-    } catch (error) {
-        console.error('Ошибка CheckPerformTransaction:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.UNABLE_TO_PERFORM,
-            message: 'Невозможно выполнить операцию'
-        });
-    }
-}
-
-// 2. CreateTransaction - создание транзакции
-async function handleCreateTransaction(params, id) {
-    try {
-        const { amount, account, time } = params;
-        const transactionId = params.id;
-        
-        console.log(`Создание транзакции ${transactionId} для заказа ${account.order_id}`);
-        
-        // Здесь должно быть сохранение транзакции в БД
-        // const transaction = await createTransactionInDB({
-        //     paycom_transaction_id: transactionId,
-        //     order_id: account.order_id,
-        //     amount: amount,
-        //     state: 1, // Создана
-        //     create_time: time
-        // });
-        
-        return createResponse(id, {
-            create_time: time,
-            transaction: transactionId,
-            state: 1
-        });
-        
-    } catch (error) {
-        console.error('Ошибка CreateTransaction:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.UNABLE_TO_PERFORM,
-            message: 'Невозможно создать транзакцию'
-        });
-    }
-}
-
-// 3. PerformTransaction - выполнение транзакции (подтверждение оплаты)
-async function handlePerformTransaction(params, id) {
-    try {
-        const transactionId = params.id;
-        
-        console.log(`Выполнение транзакции ${transactionId}`);
-        
-        // Здесь должно быть обновление статуса в БД и выполнение бизнес-логики
-        // await updateTransactionState(transactionId, 2); // Выполнена
-        // await processOrder(transaction.order_id); // Обработка заказа
-        
-        return createResponse(id, {
-            perform_time: Date.now(),
-            transaction: transactionId,
-            state: 2
-        });
-        
-    } catch (error) {
-        console.error('Ошибка PerformTransaction:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.UNABLE_TO_PERFORM,
-            message: 'Невозможно выполнить транзакцию'
-        });
-    }
-}
-
-// 4. CancelTransaction - отмена транзакции
-async function handleCancelTransaction(params, id) {
-    try {
-        const transactionId = params.id;
-        const reason = params.reason;
-        
-        console.log(`Отмена транзакции ${transactionId}, причина: ${reason}`);
-        
-        // Здесь должна быть логика отмены
-        // await cancelTransactionInDB(transactionId, reason);
-        
-        return createResponse(id, {
-            cancel_time: Date.now(),
-            transaction: transactionId,
-            state: reason === 1 ? -1 : -2
-        });
-        
-    } catch (error) {
-        console.error('Ошибка CancelTransaction:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.UNABLE_TO_PERFORM,
-            message: 'Невозможно отменить транзакцию'
-        });
-    }
-}
-
-// 5. CheckTransaction - проверка статуса транзакции
-async function handleCheckTransaction(params, id) {
-    try {
-        const transactionId = params.id;
-        
-        console.log(`Проверка статуса транзакции ${transactionId}`);
-        
-        // Здесь должен быть поиск транзакции в БД
-        // const transaction = await findTransactionById(transactionId);
-        
-        // Имитация ответа
-        return createResponse(id, {
-            create_time: Date.now() - 300000, // 5 минут назад
-            perform_time: Date.now() - 60000, // 1 минуту назад
-            cancel_time: 0,
-            transaction: transactionId,
-            state: 2,
-            reason: null
-        });
-        
-    } catch (error) {
-        console.error('Ошибка CheckTransaction:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.TRANSACTION_NOT_FOUND,
-            message: 'Транзакция не найдена'
-        });
-    }
-}
-
-// 6. GetStatement - получение выписки
-async function handleGetStatement(params, id) {
-    try {
-        const { from, to } = params;
-        
-        console.log(`Получение выписки с ${from} по ${to}`);
-        
-        // Здесь должен быть поиск транзакций за период
-        // const transactions = await getTransactionsByPeriod(from, to);
-        
-        return createResponse(id, {
-            transactions: []
-        });
-        
-    } catch (error) {
-        console.error('Ошибка GetStatement:', error);
-        return createResponse(id, null, {
-            code: PAYCOM_ERRORS.UNABLE_TO_PERFORM,
-            message: 'Невозможно получить выписку'
-        });
-    }
-}
-
-// Дополнительные endpoint'ы для вашего приложения
-
-// Создание ссылки на оплату для фронтенда
-app.post('/api/create-payment', async (req, res) => {
-    try {
-        const { amount, orderId, description } = req.body;
-        
-        // Генерация ссылки для оплаты через PayMe
-        const paymentUrl = `https://checkout.paycom.uz/${btoa(JSON.stringify({
-            merchant: PAYCOM_CONFIG.MERCHANT_ID,
-            amount: amount * 100, // В тийинах
-            account: {
-                order_id: orderId
-            },
-            description: description || 'Оплата заказа',
-            lang: 'ru'
-        }))}`;
-        
-        res.json({
-            success: true,
-            payment_url: paymentUrl,
-            order_id: orderId
-        });
-        
-    } catch (error) {
-        console.error('Ошибка создания ссылки оплаты:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Ошибка создания ссылки оплаты'
-        });
-    }
-});
-
-// Проверка статуса заказа для фронтенда
-app.get('/api/order-status/:orderId', async (req, res) => {
-    try {
-        const { orderId } = req.params;
-        
-        // Здесь должна быть проверка статуса заказа в БД
-        // const orderStatus = await getOrderStatus(orderId);
-        
-        res.json({
-            order_id: orderId,
-            status: 'pending', // paid, failed, cancelled
-            message: 'Ожидание оплаты'
-        });
-        
-    } catch (error) {
-        console.error('Ошибка проверки статуса:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Ошибка проверки статуса'
-        });
-    }
-});
-
-// Middleware для обработки ошибок
-app.use((error, req, res, next) => {
-    console.error('Необработанная ошибка:', error);
-    res.status(500).json({
-        jsonrpc: '2.0',
-        id: req.body?.id || null,
-        error: {
-            code: -32603,
-            message: 'Internal error'
-        }
+// Middleware для авторизации
+app.use((req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || authHeader !== EXPECTED_AUTH) {
+    return res.status(200).json({
+      jsonrpc: "2.0",
+      id: req.body?.id || null,
+      error: {
+        code: -32504,
+        message: "Insufficient privileges"
+      }
     });
+  }
+  next();
 });
 
-// Запуск сервера
+app.post('/paycom', (req, res) => {
+  const { method, id, params } = req.body;
+  console.log("📩 Запрос:", method, params);
+
+  switch (method) {
+    case 'CheckPerformTransaction':
+      const orderId = params.account?.order_id;
+      const amount = params.amount;
+      
+      if (!orderId) {
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Order ID not provided" },
+          id
+        });
+      }
+
+      const order = testOrders.get(orderId);
+      if (!order) {
+        console.log(`❌ Заказ ${orderId} не найден`);
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Order not found" },
+          id
+        });
+      }
+
+      if (order.amount !== amount) {
+        console.log(`❌ Неверная сумма для заказа ${orderId}. Ожидается: ${order.amount}, получено: ${amount}`);
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -31001, message: "Incorrect amount" },
+          id
+        });
+      }
+
+      console.log(`✅ Заказ ${orderId} найден, сумма корректна`);
+      res.json({ jsonrpc: "2.0", result: { allow: true }, id });
+      break;
+
+    case 'CreateTransaction':
+      const transactionId = params.id || Date.now().toString();
+      
+      // Дополнительная проверка при создании транзакции
+      const createOrderId = params.account?.order_id;
+      const createOrder = testOrders.get(createOrderId);
+      
+      if (!createOrder) {
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Order not found" },
+          id
+        });
+      }
+
+      transactions.set(transactionId, {
+        id: transactionId,
+        amount: params.amount,
+        account: params.account,
+        state: 1,
+        create_time: Date.now(),
+      });
+      
+      console.log(`✅ Транзакция ${transactionId} создана для заказа ${createOrderId}`);
+      res.json({
+        jsonrpc: "2.0",
+        result: {
+          create_time: Date.now(),
+          transaction: transactionId,
+          state: 1
+        },
+        id
+      });
+      break;
+
+    case 'PerformTransaction':
+      if (transactions.has(params.id)) {
+        const tx = transactions.get(params.id);
+        tx.state = 2;
+        tx.perform_time = Date.now();
+        console.log(`✅ Транзакция ${params.id} выполнена`);
+        res.json({
+          jsonrpc: "2.0",
+          result: {
+            perform_time: tx.perform_time,
+            transaction: tx.id,
+            state: 2
+          },
+          id
+        });
+      } else {
+        console.log(`❌ Транзакция ${params.id} не найдена`);
+        res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Transaction not found" },
+          id
+        });
+      }
+      break;
+
+    case 'CancelTransaction':
+      if (transactions.has(params.id)) {
+        const tx = transactions.get(params.id);
+        tx.state = -1;
+        tx.cancel_time = Date.now();
+        console.log(`✅ Транзакция ${params.id} отменена`);
+        res.json({
+          jsonrpc: "2.0",
+          result: {
+            cancel_time: tx.cancel_time,
+            transaction: tx.id,
+            state: -1
+          },
+          id
+        });
+      } else {
+        console.log(`❌ Транзакция ${params.id} не найдена`);
+        res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Transaction not found" },
+          id
+        });
+      }
+      break;
+
+    case 'CheckTransaction':
+      if (transactions.has(params.id)) {
+        const tx = transactions.get(params.id);
+        console.log(`✅ Информация о транзакции ${params.id}`);
+        res.json({
+          jsonrpc: "2.0",
+          result: {
+            create_time: tx.create_time,
+            perform_time: tx.perform_time || 0,
+            cancel_time: tx.cancel_time || 0,
+            transaction: tx.id,
+            state: tx.state,
+            reason: null
+          },
+          id
+        });
+      } else {
+        console.log(`❌ Транзакция ${params.id} не найдена`);
+        res.json({
+          jsonrpc: "2.0",
+          error: { code: -31050, message: "Transaction not found" },
+          id
+        });
+      }
+      break;
+
+    case 'GetStatement':
+      const from = params.from || 0;
+      const to = params.to || Date.now();
+      const transactionsList = Array.from(transactions.values())
+        .filter(tx => tx.create_time >= from && tx.create_time <= to);
+      
+      console.log(`✅ Выгрузка транзакций с ${from} по ${to}, найдено: ${transactionsList.length}`);
+      res.json({
+        jsonrpc: "2.0",
+        result: {
+          transactions: transactionsList
+        },
+        id
+      });
+      break;
+
+    default:
+      console.log(`❌ Неизвестный метод: ${method}`);
+      res.json({
+        jsonrpc: "2.0",
+        error: { code: -32601, message: "Method not found" },
+        id
+      });
+  }
+});
+
+// Добавляем endpoint для просмотра тестовых заказов
+app.get('/test-orders', (req, res) => {
+  res.json({
+    orders: Array.from(testOrders.values()),
+    info: "Эти заказы доступны для тестирования Paycom API"
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`PayMe сервер запущен на порту ${PORT}`);
-    console.log(`PayMe endpoint: http://localhost:${PORT}${PAYCOM_CONFIG.ENDPOINT}`);
-    console.log(`Merchant ID: ${PAYCOM_CONFIG.MERCHANT_ID}`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📋 Доступные тестовые заказы:`);
+  testOrders.forEach(order => {
+    console.log(`   - ${order.order_id}: ${order.amount} тийинов`);
+  });
 });
-
-module.exports = app;
