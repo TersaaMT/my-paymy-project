@@ -70,7 +70,20 @@ app.post('/paycom', (req, res) => {
         });
       }
 
-      console.log(`✅ Заказ ${orderId} найден, сумма корректна`);
+      // НОВАЯ ПРОВЕРКА: Проверяем, нет ли уже активной транзакции для этого заказа
+      const existingActiveTransaction = Array.from(transactions.values())
+        .find(tx => tx.account.order_id === orderId && (tx.state === 1 || tx.state === 2));
+
+      if (existingActiveTransaction) {
+        console.log(`❌ Заказ ${orderId} уже имеет активную транзакцию ${existingActiveTransaction.id}`);
+        return res.json({
+          jsonrpc: "2.0",
+          error: { code: -31099, message: "Order already has active transaction" },
+          id
+        });
+      }
+
+      console.log(`✅ Заказ ${orderId} найден, сумма корректна, активных транзакций нет`);
       res.json({ jsonrpc: "2.0", result: { allow: true }, id });
       break;
 
@@ -100,6 +113,22 @@ app.post('/paycom', (req, res) => {
             create_time: existingTx.create_time,
             transaction: existingTx.id,
             state: existingTx.state
+          },
+          id
+        });
+      }
+
+      // ЗАЩИТА ОТ ДВОЙНОЙ ОПЛАТЫ: Проверяем, нет ли уже другой активной транзакции для этого заказа
+      const existingTransaction = Array.from(transactions.values())
+        .find(tx => tx.account.order_id === createOrderId && (tx.state === 1 || tx.state === 2));
+
+      if (existingTransaction) {
+        console.log(`❌ Заказ ${createOrderId} уже имеет активную транзакцию ${existingTransaction.id}. Блокируем создание новой транзакции ${transactionId}`);
+        return res.json({
+          jsonrpc: "2.0",
+          error: { 
+            code: -31099, 
+            message: "Order already has active transaction. Cannot create multiple transactions for single-payment order." 
           },
           id
         });
@@ -309,5 +338,6 @@ app.listen(PORT, () => {
   testOrders.forEach(order => {
     console.log(`   - ${order.order_id}: ${order.amount} тийинов`);
   });
-  console.log(`💡 Логика оплаты: ОДНОРАЗОВАЯ (1 платеж за заказ)`);
+  console.log(`💡 Логика оплаты: ОДНОРАЗОВАЯ (защита от двойной оплаты)`);
+  console.log(`🔒 Защита: -31099 при попытке создать вторую транзакцию для заказа`);
 });
