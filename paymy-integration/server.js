@@ -70,7 +70,7 @@ app.post('/paycom', (req, res) => {
         });
       }
 
-      // НОВАЯ ПРОВЕРКА: Проверяем, нет ли уже активной транзакции для этого заказа
+      // Проверяем, нет ли уже активной транзакции для этого заказа
       const existingActiveTransaction = Array.from(transactions.values())
         .find(tx => tx.account.order_id === orderId && (tx.state === 1 || tx.state === 2));
 
@@ -140,9 +140,10 @@ app.post('/paycom', (req, res) => {
         amount: createAmount,
         account: params.account,
         state: 1,
-        create_time: createTime, // Используем время из запроса!
+        create_time: createTime,
         perform_time: null,
-        cancel_time: null
+        cancel_time: null,
+        reason: null // Инициализируем reason
       };
 
       transactions.set(transactionId, newTransaction);
@@ -235,8 +236,9 @@ app.post('/paycom', (req, res) => {
       // Отменяем транзакцию
       cancelTx.state = reason === 1 ? -1 : -2;
       cancelTx.cancel_time = Date.now();
+      cancelTx.reason = reason; // СОХРАНЯЕМ ПРИЧИНУ ОТМЕНЫ!
       
-      console.log(`✅ Транзакция ${cancelTxId} отменена`);
+      console.log(`✅ Транзакция ${cancelTxId} отменена с причиной ${reason}`);
       res.json({
         jsonrpc: "2.0",
         result: {
@@ -261,7 +263,7 @@ app.post('/paycom', (req, res) => {
       }
 
       const checkTx = transactions.get(checkTxId);
-      console.log(`✅ Информация о транзакции ${checkTxId}`);
+      console.log(`✅ Информация о транзакции ${checkTxId}, reason: ${checkTx.reason}`);
       
       res.json({
         jsonrpc: "2.0",
@@ -271,7 +273,7 @@ app.post('/paycom', (req, res) => {
           cancel_time: checkTx.cancel_time || 0,
           transaction: checkTx.id,
           state: checkTx.state,
-          reason: null
+          reason: checkTx.reason // ВОЗВРАЩАЕМ СОХРАНЕННУЮ ПРИЧИНУ!
         },
         id
       });
@@ -292,7 +294,7 @@ app.post('/paycom', (req, res) => {
           cancel_time: tx.cancel_time || 0,
           transaction: tx.id,
           state: tx.state,
-          reason: null
+          reason: tx.reason // ВКЛЮЧАЕМ ПРИЧИНУ В ВЫПИСКУ!
         }));
       
       console.log(`✅ Выгрузка транзакций с ${from} по ${to}, найдено: ${transactionsList.length}`);
@@ -340,4 +342,5 @@ app.listen(PORT, () => {
   });
   console.log(`💡 Логика оплаты: ОДНОРАЗОВАЯ (защита от двойной оплаты)`);
   console.log(`🔒 Защита: -31099 при попытке создать вторую транзакцию для заказа`);
+  console.log(`📝 Сохранение reason при отмене транзакций`);
 });
