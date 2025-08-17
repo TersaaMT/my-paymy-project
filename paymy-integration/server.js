@@ -1,15 +1,23 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
 app.use(bodyParser.json());
+app.use(cors());
+app.use(express.static('public')); // Для статических файлов HTML
 
 const LOGIN = "Paycom";
-const PASSWORD = "95n%ceFHPhU8G3UdiO3dt1g3EbpV8KFS66y9"; 
+const PASSWORD = process.env.PAYME_SECRET_KEY || "95n%ceFHPhU8G3UdiO3dt1g3EbpV8KFS66y9"; 
+const MERCHANT_ID = process.env.PAYME_MERCHANT_ID || "***ВСТАВЬТЕ_ВАШ_MERCHANT_ID***";
 const EXPECTED_AUTH = "Basic " + Buffer.from(`${LOGIN}:${PASSWORD}`).toString('base64');
 
 // Хранилище транзакций (в продакшене - база данных)
 const transactions = new Map();
+
+// Хранилище заказов для Mini App
+const orders = new Map();
 
 // Тестовые заказы для проверки
 const testOrders = new Map([
@@ -18,8 +26,146 @@ const testOrders = new Map([
   ['12345', { order_id: '12345', amount: 1000, status: 'pending' }]
 ]);
 
-// Middleware для авторизации
-app.use((req, res, next) => {
+// ============== НОВЫЕ ЭНДПОИНТЫ ДЛЯ MINI APP ==============
+
+// 1. Создание счёта для фронтенда
+app.post('/api/pay/create', (req, res) => {
+    try {
+        const { amount = 50000, description = 'Premium доступ' } = req.body;
+        
+        // Генерируем уникальный ID заказа
+        const orderId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        
+        // Добавляем заказ в testOrders чтобы он был доступен для Payme API
+        testOrders.set(orderId, { 
+            order_id: orderId, 
+            amount: amount, 
+            status: 'pending' 
+        });
+        
+        // Сохраняем заказ для фронтенда
+        orders.set(orderId, {
+            id: orderId,
+            amount: amount,
+            description: description,
+            status: 'pending',
+            created_at: new Date()
+        });
+
+        // Формируем URL для оплаты
+        const payUrl = `https://checkout.paycom.uz/${Buffer.from(`m=${MERCHANT_ID};ac.order_id=${orderId};a=${amount};c=${encodeURIComponent(description)}`).toString('base64')}`;
+
+        console.log(`✅ Создан заказ ${orderId} на сумму ${amount} тийинов`);
+
+        res.json({
+            success: true,
+            order_id: orderId,
+            pay_url: payUrl,
+            amount: amount,
+            description: description
+        });
+
+    } catch (error) {
+        console.error('Ошибка создания счёта:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: 'Внутренняя ошибка сервера' 
+        });
+    }
+});
+
+// 2. Проверка статуса платежа для фронтенда
+app.get('/api/pay/status/:orderId', (req, res) => {
+    try {
+        const orderId = req.params.orderId;
+        const order = orders.get(orderId);
+        
+        if (!order) {
+            return res.status(404).json({
+                success: false,
+                error: 'Заказ не найден'
+            });
+        }
+
+        // Проверяем есть ли успешная транзакция для этого заказа
+        const successfulTransaction = Array.from(transactions.values())
+            .find(tx => tx.account?.order_id === orderId && tx.state === 2);
+
+        // Проверяем есть ли отмененная транзакция
+        const cancelledTransaction = Array.from(transactions.values())
+            .find(tx => tx.account?.order_id === orderId && (tx.state === -1 || tx.state === -2));
+
+        // Обновляем статус заказа на основе транзакций
+        if (successfulTransaction) {
+            order.status = 'completed';
+            order.completed_at = new Date(successfulTransaction.perform_time);
+        } else if (cancelledTransaction) {
+            order.status = 'cancelled';
+            order.cancelled_at = new Date(cancelledTransaction.cancel_time);
+        }
+        
+        res.json({
+            success: true,
+            order: {
+                id: order.id,
+                status: order.status,
+                amount: order.amount,
+                description: order.description,
+                created_at: order.created_at,
+                completed_at: order.completed_at || null,
+                cancelled_at: order.cancelled_at || null
+            }
+        });
+        
+    } catch (error) {
+        console.error('Ошибка получения статуса:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Внутренняя ошибка сервера'
+        });
+    }
+});
+
+// 3. Страница успешной оплаты
+app.get('/payment-success', (req, res) => {
+    const orderId = req.query.order_id;
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Оплата завершена</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                .success { color: green; font-size: 24px; margin-bottom: 20px; }
+                .order-id { color: #666; margin-bottom: 30px; }
+                .btn { background: #0088cc; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; }
+            </style>
+        </head>
+        <body>
+            <div class="success">✅ Оплата успешно завершена!</div>
+            <div class="order-id">Номер заказа: ${orderId}</div>
+            <a href="#" onclick="window.close()" class="btn">Вернуться в приложение</a>
+            
+            <script>
+                setTimeout(() => window.close(), 3000);
+                if (window.opener) {
+                    window.opener.postMessage({
+                        type: 'PAYMENT_SUCCESS',
+                        orderId: '${orderId}'
+                    }, '*');
+                }
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+// ============== СУЩЕСТВУЮЩИЙ PAYME API ==============
+
+// Middleware для авторизации (только для /paycom)
+app.use('/paycom', (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader || authHeader !== EXPECTED_AUTH) {
     return res.status(200).json({
@@ -143,10 +289,18 @@ app.post('/paycom', (req, res) => {
         create_time: createTime,
         perform_time: null,
         cancel_time: null,
-        reason: null // Инициализируем reason
+        reason: null
       };
 
       transactions.set(transactionId, newTransaction);
+      
+      // Обновляем статус заказа для фронтенда
+      if (orders.has(createOrderId)) {
+        const order = orders.get(createOrderId);
+        order.status = 'processing';
+        orders.set(createOrderId, order);
+      }
+      
       console.log(`✅ Транзакция ${transactionId} создана для заказа ${createOrderId}`);
       
       res.json({
@@ -192,6 +346,15 @@ app.post('/paycom', (req, res) => {
       tx.state = 2;
       tx.perform_time = Date.now();
       
+      // Обновляем статус заказа для фронтенда
+      const performOrderId = tx.account?.order_id;
+      if (orders.has(performOrderId)) {
+        const order = orders.get(performOrderId);
+        order.status = 'completed';
+        order.completed_at = new Date(tx.perform_time);
+        orders.set(performOrderId, order);
+      }
+      
       console.log(`✅ Транзакция ${performTxId} выполнена`);
       res.json({
         jsonrpc: "2.0",
@@ -236,7 +399,16 @@ app.post('/paycom', (req, res) => {
       // Отменяем транзакцию
       cancelTx.state = reason === 1 ? -1 : -2;
       cancelTx.cancel_time = Date.now();
-      cancelTx.reason = reason; // СОХРАНЯЕМ ПРИЧИНУ ОТМЕНЫ!
+      cancelTx.reason = reason;
+      
+      // Обновляем статус заказа для фронтенда
+      const cancelOrderId = cancelTx.account?.order_id;
+      if (orders.has(cancelOrderId)) {
+        const order = orders.get(cancelOrderId);
+        order.status = 'cancelled';
+        order.cancelled_at = new Date(cancelTx.cancel_time);
+        orders.set(cancelOrderId, order);
+      }
       
       console.log(`✅ Транзакция ${cancelTxId} отменена с причиной ${reason}`);
       res.json({
@@ -273,7 +445,7 @@ app.post('/paycom', (req, res) => {
           cancel_time: checkTx.cancel_time || 0,
           transaction: checkTx.id,
           state: checkTx.state,
-          reason: checkTx.reason // ВОЗВРАЩАЕМ СОХРАНЕННУЮ ПРИЧИНУ!
+          reason: checkTx.reason
         },
         id
       });
@@ -294,7 +466,7 @@ app.post('/paycom', (req, res) => {
           cancel_time: tx.cancel_time || 0,
           transaction: tx.id,
           state: tx.state,
-          reason: tx.reason // ВКЛЮЧАЕМ ПРИЧИНУ В ВЫПИСКУ!
+          reason: tx.reason
         }));
       
       console.log(`✅ Выгрузка транзакций с ${from} по ${to}, найдено: ${transactionsList.length}`);
@@ -317,6 +489,8 @@ app.post('/paycom', (req, res) => {
   }
 });
 
+// ============== СУЩЕСТВУЮЩИЕ ЭНДПОИНТЫ ==============
+
 // Добавляем endpoint для просмотра тестовых заказов
 app.get('/test-orders', (req, res) => {
   res.json({
@@ -333,14 +507,34 @@ app.get('/transactions', (req, res) => {
   });
 });
 
+// Новый endpoint для просмотра заказов Mini App
+app.get('/orders', (req, res) => {
+  res.json({
+    orders: Array.from(orders.values()),
+    count: orders.size,
+    info: "Заказы созданные через Mini App"
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📋 Доступные тестовые заказы:`);
+  console.log(`💳 Payme Merchant ID: ${MERCHANT_ID}`);
+  console.log(`🔐 Secret Key установлен: ${PASSWORD ? 'Да' : 'Нет'}`);
+  console.log(`\n📋 Доступные эндпоинты:`);
+  console.log(`  🆕 POST /api/pay/create - Создание счёта для Mini App`);
+  console.log(`  🆕 GET /api/pay/status/:orderId - Статус заказа для Mini App`);
+  console.log(`  🆕 GET /payment-success - Страница успешной оплаты`);
+  console.log(`  🆕 GET /orders - Просмотр заказов Mini App`);
+  console.log(`  📡 POST /paycom - Callback от Payme`);
+  console.log(`  🔧 GET /test-orders - Просмотр тестовых заказов`);
+  console.log(`  🔧 GET /transactions - Просмотр транзакций`);
+  console.log(`\n📋 Доступные тестовые заказы:`);
   testOrders.forEach(order => {
     console.log(`   - ${order.order_id}: ${order.amount} тийинов`);
   });
   console.log(`💡 Логика оплаты: ОДНОРАЗОВАЯ (защита от двойной оплаты)`);
   console.log(`🔒 Защита: -31099 при попытке создать вторую транзакцию для заказа`);
   console.log(`📝 Сохранение reason при отмене транзакций`);
+  console.log(`🎯 Mini App интеграция: ГОТОВА`);
 });
